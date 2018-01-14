@@ -720,6 +720,7 @@ gst_input_selector_get_clipped_running_time (GstSegment * seg, GstBuffer * buf)
 
 /* must be called without the SELECTOR_LOCK, will wait until the running time
  * of the active pad is after this pad or return TRUE when flushing */
+//多个音轨多个pad，未激活的pad需要wait等待，使多个pad之间能保证时间一致，未激活pad激活后的播放时间与上一个pad播放时间一致。
 static gboolean
 gst_input_selector_wait_running_time (GstInputSelector * sel,
     GstSelectorPad * selpad, GstBuffer * buf)
