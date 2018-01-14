@@ -1615,7 +1615,7 @@ gst_input_selector_get_active_sinkpad (GstInputSelector * sel)
 
   return active_sinkpad;
 }
-
+//申请多个pad，用来控制可处理的streams数量
 static GstPad *
 gst_input_selector_request_new_pad (GstElement * element,
     GstPadTemplate * templ, const gchar * unused, const GstCaps * caps)
