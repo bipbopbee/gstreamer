@@ -113,7 +113,8 @@ struct _GstBusPrivate
 {
   GstAtomicQueue *queue;
   GMutex queue_lock;
-
+  //大量element发送消息，导致起播卡顿
+  GMutex q_message_lock;
   GstBusSyncHandler sync_handler;
   gpointer sync_handler_data;
   GDestroyNotify sync_handler_notify;
@@ -227,6 +228,7 @@ gst_bus_init (GstBus * bus)
   bus->priv = G_TYPE_INSTANCE_GET_PRIVATE (bus, GST_TYPE_BUS, GstBusPrivate);
   bus->priv->enable_async = DEFAULT_ENABLE_ASYNC;
   g_mutex_init (&bus->priv->queue_lock);
+  g_mutext_init(&bus->priv->q_message_lock);
   bus->priv->queue = gst_atomic_queue_new (32);
 
   GST_DEBUG_OBJECT (bus, "created");
@@ -250,7 +252,7 @@ gst_bus_dispose (GObject * object)
     bus->priv->queue = NULL;
     g_mutex_unlock (&bus->priv->queue_lock);
     g_mutex_clear (&bus->priv->queue_lock);
-
+    g_mutex_clear (&bus->priv->q_message_lock);
     if (bus->priv->poll)
       gst_poll_free (bus->priv->poll);
     bus->priv->poll = NULL;
@@ -355,8 +357,12 @@ gst_bus_post (GstBus * bus, GstMessage * message)
     case GST_BUS_PASS:
       /* pass the message to the async queue, refcount passed in the queue */
       GST_DEBUG_OBJECT (bus, "[msg %p] pushing on async queue", message);
+      //大量element发送消息，导致起播卡顿
+      g_mutex_lock (&bus->priv->q_message_lock);
       gst_atomic_queue_push (bus->priv->queue, message);
       gst_poll_write_control (bus->priv->poll);
+      g_mutex_unlock (&bus->priv->q_message_lock);
+      //大量element发送消息，导致起播卡顿
       GST_DEBUG_OBJECT (bus, "[msg %p] pushed on async queue", message);
 
       break;
@@ -379,9 +385,13 @@ gst_bus_post (GstBus * bus, GstMessage * message)
        * the cond will be signalled and we can continue */
       g_mutex_lock (lock);
 
+      //大量element发送消息，导致起播卡顿
+      g_mutex_lock (&bus->priv->q_message_lock);
       gst_atomic_queue_push (bus->priv->queue, message);
       gst_poll_write_control (bus->priv->poll);
+      g_mutex_unlock (&bus->priv->q_message_lock);
 
+      //大量element发送消息，导致起播卡顿
       /* now block till the message is freed */
       g_cond_wait (cond, lock);
 
