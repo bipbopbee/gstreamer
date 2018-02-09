@@ -103,3 +103,231 @@ static HI_S32 _priv_sme_proc_entry_get(HI_PROC_SHOW_BUFFER_S * pstBuf, HI_VOID *
 
   return HI_SUCCESS;
 }
+static HI_S32 _priv_sme_proc_entry_set(HI_PROC_SHOW_BUFFER_S * pstBuf, HI_U32 u32Argc,
+  HI_U8 *pu8Argv[], HI_VOID *pPrivData)
+{
+  HI_S32          s32ret          = HI_SUCCESS;
+  GSmeProcEntry*  self_entry      = (GSmeProcEntry*)pPrivData;;
+  gint            emit_error      = 0;
+  guint           i;
+
+  GST_INFO_OBJECT(NULL, "in _priv_sme_proc_entry_set, pstBuf:%p", pstBuf);
+
+  for (i = 0; i < u32Argc; i++){
+    (void)HI_PROC_Printf(pstBuf, "\tArgv[%d]: %s \n", i, (HI_CHAR*)pu8Argv[i]);
+  }
+
+  g_signal_emit((gpointer)self_entry,//callback:arg1, must be self object
+    g_sme_proc_signals[SIGNAL_PROC_SET],//signal_id
+    0,//Gualk default is 0.
+    (guint)u32Argc,
+    (gpointer)pu8Argv,
+    (gpointer)pstBuf,
+    &emit_error);
+
+  GST_INFO_OBJECT(NULL, "out _priv_sme_proc_entry_set, emit_error:%d", emit_error);
+
+  return s32ret;
+}
+
+static gint _priv_sme_proc_entry_proc_printf(GObject * object,
+  gpointer proc_buf, const gchar* buf)
+{
+  HI_S32          s32ret;
+  GSmeProcEntry*  self_entry      = (GSmeProcEntry*)object;;
+
+  GST_DEBUG_OBJECT(NULL, "in _priv_sme_proc_entry_proc_printf, self_entry:%p", self_entry);
+
+  s32ret = HI_PROC_Printf((HI_PROC_SHOW_BUFFER_S*)proc_buf, "%s", buf);
+
+  GST_DEBUG_OBJECT(NULL, "out _priv_sme_proc_entry_proc_printf, s32ret:%#x", s32ret);
+
+  return (gint)s32ret;
+}
+
+static void g_sme_proc_entry_init(GSmeProcEntry* sme_proc_entry)
+{
+  GST_INFO_OBJECT(NULL, "in g_sme_proc_entry_init, self:%p", sme_proc_entry);
+
+
+  GST_INFO_OBJECT(NULL, "out g_sme_proc_entry_init, self:%p", sme_proc_entry);
+
+  return;
+}
+
+static void g_sme_proc_entry_finalize(GObject* object)
+{
+  GST_DEBUG_OBJECT(NULL, "in g_sme_proc_entry_finalize, self:%p", object);
+
+  G_OBJECT_CLASS (g_entry_parent_class)->finalize (object);
+
+  GST_DEBUG_OBJECT(NULL, "out g_sme_proc_entry_finalize, self:%p", object);
+
+  return;
+}
+
+static void g_sme_proc_entry_class_init(GSmeProcEntryClass* klass)
+{
+  GObjectClass *    gobject_klass;
+
+  GST_DEBUG_OBJECT(NULL, "in g_sme_proc_entry_class_init");
+
+  g_entry_parent_class = g_type_class_peek_parent (klass);
+  gobject_klass = (GObjectClass *) klass;
+  gobject_klass->finalize = g_sme_proc_entry_finalize;
+
+  g_sme_proc_signals[SIGNAL_PROC_PRINT] =
+      g_signal_new ("proc_printf", G_TYPE_FROM_CLASS (klass),
+      G_SIGNAL_RUN_LAST,
+      (guint)G_STRUCT_OFFSET (GSmeProcEntryClass, proc_printf), NULL, NULL,
+      g_cclosure_marshal_generic,
+      G_TYPE_INT,//return type
+      2,//arg num
+      G_TYPE_POINTER, G_TYPE_STRING);
+
+  g_sme_proc_signals[SIGNAL_PROC_GET] =
+      g_signal_new ("proc_get", G_TYPE_FROM_CLASS (klass),
+      G_SIGNAL_RUN_LAST,
+      (guint)G_STRUCT_OFFSET (GSmeProcEntryClass, proc_get), NULL, NULL,
+      g_cclosure_marshal_generic,
+      G_TYPE_INT,//return type
+      1,//arg num
+      G_TYPE_POINTER);
+
+  g_sme_proc_signals[SIGNAL_PROC_SET] =
+      g_signal_new ("proc_set", G_TYPE_FROM_CLASS (klass),
+      G_SIGNAL_RUN_LAST,
+      (guint)G_STRUCT_OFFSET (GSmeProcEntryClass, proc_set), NULL, NULL,
+      g_cclosure_marshal_generic,
+      G_TYPE_INT,//return type
+      3,//arg num
+      G_TYPE_UINT, G_TYPE_POINTER, G_TYPE_POINTER);
+
+  klass->proc_printf = _priv_sme_proc_entry_proc_printf;
+
+  GST_DEBUG_OBJECT(NULL, "out g_sme_proc_entry_class_init");
+
+  return;
+}
+
+//------------------------------------------------------------------------
+static gboolean _priv_gst_sme_proc_register (GstPlugin * plugin)
+{
+  GType     sme_proc_type;
+
+  gboolean  bret          = FALSE;
+  GTypeInfo typeinfo      = {
+      sizeof (GSmeProcClass),
+      NULL,
+      NULL,
+      (GClassInitFunc) g_sme_proc_class_init,
+      NULL,
+      NULL,
+      sizeof (GSmeProc),
+      0,
+      (GInstanceInitFunc) g_sme_proc_init,
+      NULL,
+  };
+
+  (void)plugin;
+
+  GST_DEBUG_OBJECT(NULL, "in _priv_gst_sme_proc_register");
+
+  sme_proc_type = g_type_register_static (G_TYPE_OBJECT, "sme_proc",
+    &typeinfo, (GTypeFlags)0);
+  if (G_TYPE_INVALID != sme_proc_type){
+    (void)g_type_class_ref(sme_proc_type);
+    bret = TRUE;
+  } else {
+    GST_WARNING_OBJECT(NULL, "register sme_proc gobject failed!");
+  }
+  GST_DEBUG_OBJECT(NULL, "out _priv_gst_sme_proc_register, bret:%d", bret);
+
+  return bret;
+}
+
+static gboolean _priv_gst_sme_proc_entry_register (GstPlugin * plugin)
+{
+  gboolean  bret      = FALSE;
+  GTypeInfo typeinfo  = {
+      sizeof (GSmeProcEntryClass),
+      NULL,
+      NULL,
+      (GClassInitFunc) g_sme_proc_entry_class_init,
+      NULL,
+      NULL,
+      sizeof (GSmeProcEntry),
+      0,
+      (GInstanceInitFunc) g_sme_proc_entry_init,
+      NULL,
+  };
+
+  (void)plugin; 
+  
+  GST_DEBUG_OBJECT(NULL, "in _priv_gst_sme_proc_entry_register");
+
+  g_sme_proc_entry_type = g_type_register_static (G_TYPE_OBJECT, "sme_proc_entry",
+    &typeinfo, (GTypeFlags)0);
+  if (G_TYPE_INVALID != g_sme_proc_entry_type){
+    (void)g_type_class_ref(g_sme_proc_entry_type);
+    bret = TRUE;
+  } else {
+    GST_WARNING_OBJECT(NULL, "register sme_proc_entry gobject failed!");
+  }
+
+  GST_DEBUG_OBJECT(NULL, "out _priv_gst_sme_proc_entry_register, bret:%d", bret);
+
+  return bret;
+}
+
+#ifdef HAVE_CONFIG_H
+
+#ifdef GST_FUNCTION
+#undef GST_FUNCTION
+#endif
+
+#include "config.h"
+
+//for dynamic load smeplugin
+#ifdef GST_PLUGIN_BUILD_STATIC
+#undef GST_PLUGIN_BUILD_STATIC
+#endif
+
+#endif
+
+static gboolean
+gst_sme_proc_plugin_init (GstPlugin * plugin)
+{
+  gint fd;
+
+  GST_DEBUG_OBJECT(NULL, "in register gst_sme_proc_plugin_init");
+
+  if ((fd = open("/mnt/smeproc", O_RDONLY, S_IRUSR | S_IWUSR)) >= 0){
+    close(fd);
+    g_enable_take_pid = TRUE;
+  }
+
+  //init global gmutex
+  g_mutex_init(&g_mutex);
+
+  //register GSmeProcEntry
+  if (!_priv_gst_sme_proc_entry_register (plugin)){
+    GST_WARNING_OBJECT(NULL, "register sme_proc_entry fail.");
+    return FALSE;
+  }
+
+  //register GSmeProc
+  if (!_priv_gst_sme_proc_register (plugin))
+    GST_WARNING_OBJECT(NULL, "register sme_proc fail.");
+
+  GST_DEBUG_OBJECT(NULL, "out register gst_sme_proc_plugin_init, success");
+
+  return TRUE;
+}
+
+//lint -esym(714, gst_plugin_desc)
+GST_PLUGIN_DEFINE (GST_VERSION_MAJOR,
+    GST_VERSION_MINOR,
+    sme_proc_plugin,
+    "sme proc plugin",
+    gst_sme_proc_plugin_init, VERSION, GST_LICENSE, GST
