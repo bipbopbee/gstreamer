@@ -133,5 +133,256 @@ enum
 };
 
 static HI_U32  g_himodule_id          = HI_INVALID_MODULE_ID;     //hi module id,HI_PROC对应使用的HI_MODULE
+static gchar* g_static_dir            = NULL;                     //静态顶层目录名
+static guint  g_static_dir_add_count  = 0;                        //add_dir成功的次数
+static GMutex g_mutex;                                            //全局变量锁
+static guint  g_sme_proc_signals[LAST_SIGNAL] = { 0 };            //本文件所有signal_id
+static GType  g_sme_proc_entry_type = G_TYPE_INVALID;             //sme_entry_type值
+static gboolean g_enable_take_pid = FALSE;                        //是否开启目录带上进程号
 
+static GSmeProcClass *      g_parent_class = NULL;
+static GSmeProcEntryClass*  g_entry_parent_class = NULL;
+
+
+static HI_S32
+_priv_sme_proc_entry_get(HI_PROC_SHOW_BUFFER_S * pstBuf, HI_VOID *pPrivData);
+
+static HI_S32
+_priv_sme_proc_entry_set(HI_PROC_SHOW_BUFFER_S * pstBuf, HI_U32 u32Argc,
+  HI_U8 *pu8Argv[], HI_VOID *pPrivData);
+
+#define SEC_Snprintf(dest, size_max, size_count, str_fmt, ...) \
+  { \
+    V_INT32 i32VOSRes = VOS_Snprintf_S(dest, size_max, size_count,\
+      str_fmt, ##__VA_ARGS__); \
+    if (E_VOS_STR_ENONE != i32VOSRes){ \
+      GST_WARNING("VOS_Snprintf_S failed, i32VOSRes:%d", i32VOSRes);\
+    } \
+  }
+
+//proc status file format as following:
+//Name:   test_sme_dvbpla
+//State:  S (sleeping)
+//.....
+
+static void _priv_get_proc_name(pid_t pid, gchar *proc_name, guint32 size)
+{
+  gchar proc_pid_path[PROC_STATUS_BUF_SIZE] = {0,};
+  gchar buf[PROC_STATUS_BUF_SIZE]           = {0,};
+  gint  fd                                  = 0;
+  gchar* tmp_begin                          = NULL;
+  gchar* tmp_end                            = NULL;
+
+  SEC_Snprintf(proc_pid_path, sizeof(proc_pid_path),
+    sizeof(proc_pid_path) - 1, "/proc/%d/status", pid);
+
+  G_STMT_START{
+    fd = open(proc_pid_path, O_RDONLY, S_IRUSR | S_IWUSR);
+    if (-1 == fd){
+      GST_WARNING("open %s failed!", proc_pid_path);
+      break;
+    }
+
+    if(read(fd, buf, sizeof(buf) - 1) <= strlen("Name:")){
+      GST_WARNING("read %s failed!", proc_pid_path);
+      break;
+    }
+    buf[PROC_STATUS_BUF_SIZE - 1] = (gchar)0;
+    tmp_begin = strstr(buf, ":");
+    if (!tmp_begin){
+      GST_WARNING("get spliter failed");
+      break;      
+    }
+    
+    for (tmp_begin++; (glong)tmp_begin < (glong)(&buf[strlen(buf)]); tmp_begin++){
+      if(!tmp_begin[0] || (tmp_begin[0] != '\t' && tmp_begin[0] != ' ')){
+        break;
+      }
+    }
+
+    for (tmp_end = tmp_begin; (glong)tmp_end < (glong)(&buf[strlen(buf)]); tmp_end++){
+      if (!tmp_end[0] || tmp_end[0] == '\t' || tmp_end[0] == '\n'){
+        break;
+      }
+    }
+
+    tmp_end[0] = '\0';
+
+    SEC_Snprintf(proc_name, size, size > 1 ? size - 1 : 0, "%s", tmp_begin);
+    GST_WARNING("proc_name:%s", tmp_begin);
+  }G_STMT_END;
+
+  if (fd != -1){
+    close(fd);
+  }
+
+  return;
+}
+
+static void _priv_sme_proc_entry_list_free(GSmeProc* self)
+{
+  g_mutex_lock(&self->entry_list_mutex);
+  if (self->proc_entry_list){
+    GList* tmp_list;
+ 
+    GST_WARNING_OBJECT(NULL, "_priv_sme_proc_entry_list_free, self:%p,"
+      " proc_entry_list(%p) is not null why?", self, self->proc_entry_list);
+
+    for (tmp_list = self->proc_entry_list; tmp_list; tmp_list = tmp_list->next) {
+      GSmeProcEntry* entry = tmp_list->data;
+
+      if (entry){
+        g_object_unref(entry);
+      }
+
+      tmp_list->data = NULL;
+    }
+
+    g_list_free(self->proc_entry_list);
+    self->proc_entry_list = NULL;
+  }
+  g_mutex_unlock(&self->entry_list_mutex);
+
+  return;
+}
+
+static gint _priv_sme_proc_add_dir(GObject* object, const gchar* dir_tag, guint id)
+{
+  gint        ret         = -1;
+  pid_t       this_pid    = 0;
+  GSmeProc*   self        = (GSmeProc*)object;
+  HI_S32      s32error    = HI_SUCCESS;
+  guint       dir_len     = 0;
+  gchar       himodule_name[HI_PROC_MODULE_NAME_MAX_LEN] = {0,};//hi module name，为sme.[PID]
+  gchar       proc_name[PROC_STATUS_BUF_SIZE] = {0,};
+
+  GST_INFO_OBJECT(NULL, "in _priv_sme_proc_add_dir,self:%p, dir_tag:%s, id:%u",
+    self, dir_tag?dir_tag:"NULL", id);
+
+  g_mutex_lock(&g_mutex);
+
+  do{
+    if (!self){
+      GST_WARNING_OBJECT(NULL, "Warning! self is null, failed!");
+      break;
+    }
+    this_pid = getpid();
+
+    if (G_MAXUINT32 == id){
+      if (g_static_dir){
+        self->hi_module_id = g_himodule_id;
+        self->dir = g_static_dir;
+        g_static_dir_add_count++;
+        ret = 0;
+        GST_DEBUG_OBJECT(NULL, "_priv_sme_proc_add_dir,self:%p, already created!", self);
+        break;
+      }
+      SEC_Snprintf(himodule_name, sizeof(himodule_name),
+        sizeof(himodule_name) - 1, "%s.%d", STATIC_DIR_PREFIX, this_pid);
+
+      if (dir_tag && strlen(dir_tag)){
+        SEC_Snprintf(proc_name, sizeof(proc_name), sizeof(proc_name) - 1, "%s", dir_tag);
+      } else {
+        _priv_get_proc_name(this_pid, proc_name, sizeof(proc_name));
+      }
+      dir_len = (guint)(strlen(himodule_name) + strlen(proc_name) + 2);
+    } else {
+      if (!dir_tag){
+        GST_WARNING_OBJECT(NULL, "self:%p, dir_tag is null", self);
+        break;
+      }
+
+      if (self->dir){
+        GST_ERROR_OBJECT(NULL, "self:%p, dir is already exist, only 1 dir for "
+          "1 instance, dir:%s", self, self->dir);
+        ret = 0;
+        break;
+      }
+      SEC_Snprintf(himodule_name, sizeof(himodule_name), sizeof(himodule_name) - 1, "%d.%s%d",
+        this_pid, dir_tag, id);
+      _priv_get_proc_name(this_pid, proc_name, sizeof(proc_name));
+      dir_len = (guint)(strlen(STATIC_DIR_PREFIX) + strlen(proc_name) + strlen(dir_tag) + 32);
+    }
+    (void)HI_SYS_Init();
+    s32error = HI_MODULE_RegisterByName((const HI_CHAR*)himodule_name, &self->hi_module_id);
+    if (HI_SUCCESS != s32error){
+      GST_ERROR_OBJECT(NULL, "self:%p, HI_MODULE_RegisterByName failed, "
+        "himodule_name:%s, s32error:%#x", self, himodule_name, s32error);
+
+      self->hi_module_id = HI_INVALID_MODULE_ID;
+      (void)HI_SYS_DeInit();
+
+      break;
+    }
+
+    self->dir = g_malloc(dir_len);
+    if (!self->dir){
+      GST_ERROR_OBJECT(NULL, "self:%p, g_malloc failed! static dir_len:%d", self, dir_len);
+      break;
+    }
+
+    if (G_MAXUINT32 == id){
+      if (g_enable_take_pid && strcmp(DIR_WITH_PID_BLACK_NAME, proc_name)){
+        SEC_Snprintf(self->dir, dir_len, dir_len - 1, "%s.%s.%d", STATIC_DIR_PREFIX,
+          proc_name, this_pid);
+      } else {
+        SEC_Snprintf(self->dir, dir_len, dir_len - 1, "%s.%s", STATIC_DIR_PREFIX,
+          proc_name);
+      }
+      g_static_dir = self->dir;
+    } else {
+      if (g_enable_take_pid && strcmp(DIR_WITH_PID_BLACK_NAME, proc_name)){
+        SEC_Snprintf(self->dir, dir_len, dir_len - 1, "%s.%s.%d.%s.%02d", STATIC_DIR_PREFIX,
+          proc_name, this_pid, dir_tag,id);
+      } else {
+        SEC_Snprintf(self->dir, dir_len, dir_len - 1, "%s.%s.%s.%02d", STATIC_DIR_PREFIX,
+          proc_name, dir_tag,id);
+      }
+    }
+    self->dir_id  = id;
+
+    GST_INFO_OBJECT(NULL, "_priv_sme_proc_add_dir,self:%p,himodule_name:%s,"
+      " dir:%s, hi_module_id:%#x,id:%#x",
+      self, himodule_name, self->dir, self->hi_module_id, id);
+
+    s32error = HI_PROC_AddDir(self->dir);
+    if (HI_SUCCESS != s32error){
+      GST_ERROR_OBJECT(NULL, "self:%p, HI_PROC_AddDir failed! dir:%s", self, self->dir);
+      break;
+    }
+
+    if (G_MAXUINT32 == id){
+      g_static_dir_add_count++;
+      g_himodule_id = self->hi_module_id;
+    }
+    ret = 0;
+  }while(FALSE);
+
+  //add dir 出错，这里要做逆过程
+  if (0 != ret && self){
+    if (NULL != self->dir){
+      g_free(self->dir);
+    }
+
+    if (self->hi_module_id != HI_INVALID_MODULE_ID){
+        (void)HI_MODULE_UnRegister(self->hi_module_id);
+        (void)HI_SYS_DeInit();
+        self->hi_module_id = HI_INVALID_MODULE_ID;
+    }
+
+    if (G_MAXUINT32 == id){
+      g_static_dir  = NULL;
+      g_himodule_id = HI_INVALID_MODULE_ID;
+      self->dir_id  = G_MAXUINT32;
+    } else {
+      self->dir_id  = 0;
+    }
+    self->dir       = NULL;
+  }
+  g_mutex_unlock(&g_mutex);
+
+  GST_INFO_OBJECT(NULL, "out _priv_sme_proc_add_dir,self:%p, ret:%d, g_static_dir_add_count:%d",
+    self, ret, g_static_dir_add_count);
+
+  return ret;
 
