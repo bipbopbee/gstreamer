@@ -385,4 +385,198 @@ static gint _priv_sme_proc_add_dir(GObject* object, const gchar* dir_tag, guint 
     self, ret, g_static_dir_add_count);
 
   return ret;
+}
+static gint _priv_sme_proc_remove_dir(GObject * object)
+{
+  gint        ret       = 0;
+  GSmeProc*   self      = (GSmeProc*)object;
+  HI_S32      s32error  = HI_SUCCESS;
+
+  GST_INFO_OBJECT(NULL, "in _priv_sme_proc_remove_dir,self:%p", self);
+
+  do{
+    if (!self){
+      GST_WARNING_OBJECT(NULL, "_priv_sme_proc_remove_dir, Warning! object is null");
+      break;
+    }
+
+    if (!self->dir){
+      GST_WARNING_OBJECT(NULL, "_priv_sme_proc_remove_dir, Warning! dir is null");
+      break;
+    }
+
+    //静态目录
+    if (G_MAXUINT32 == self->dir_id){
+      g_mutex_lock(&g_mutex);
+      if (g_static_dir_add_count > 0){
+        g_static_dir_add_count--;
+      }
+
+      if (g_static_dir_add_count > 0){
+        self->hi_module_id = HI_INVALID_MODULE_ID;
+        self->dir     = NULL;
+        g_mutex_unlock(&g_mutex);
+        break;
+      }
+    }
+
+    if (self->hi_module_id != HI_INVALID_MODULE_ID){
+      _priv_sme_proc_entry_list_free(self);
+      s32error = HI_PROC_RemoveDir(self->dir);
+      if (HI_SUCCESS != s32error){
+        GST_WARNING_OBJECT(NULL, "Warning! HI_PROC_RemoveDir, failed(:%#x), dir:%s",
+          s32error, self->dir);
+      }
+
+      (void)HI_MODULE_UnRegister(self->hi_module_id);
+      (void)HI_SYS_DeInit();
+      self->hi_module_id = HI_INVALID_MODULE_ID;
+      g_free(self->dir);
+    }
+
+    self->dir = NULL;
+
+    if (G_MAXUINT32 == self->dir_id){
+      g_himodule_id = HI_INVALID_MODULE_ID;
+      g_static_dir  = NULL;
+      g_mutex_unlock(&g_mutex);
+    }
+  }while(FALSE);
+
+  GST_INFO_OBJECT(NULL, "out _priv_sme_proc_remove_dir,self:%p, ret:%d, g_static_dir_add_count:%d",
+    self, ret, g_static_dir_add_count);
+
+  return ret;
+}
+
+static GObject* _priv_sme_proc_add_entry(GObject * object, const gchar* entry_tag,
+  guint id)
+{
+  GSmeProcEntry*  ret       = NULL;
+  GSmeProc*       self      = (GSmeProc*)object;
+  HI_S32          s32error  = HI_SUCCESS;
+
+  GST_INFO_OBJECT(NULL, "in _priv_sme_proc_add_entry, self:%p,"
+    "entry_name:%s, id:%#x",
+    self, entry_tag?entry_tag:"NULL", id);
+
+  do{
+    if (!self){
+      GST_WARNING_OBJECT(NULL, "_priv_sme_proc_add_entry, Warning! self is null");
+      break;
+    }
+
+    if (!self->dir){
+      GST_WARNING_OBJECT(NULL, "_priv_sme_proc_add_entry, self:%p, Warning! "
+        "dir is null", self);
+      break;
+    }
+
+    if (!entry_tag){
+      GST_WARNING_OBJECT(NULL, "_priv_sme_proc_add_entry, self:%p, Warning! "
+        "entry_tag is null", self);
+      break;
+    }
+
+    ret = g_object_new(g_sme_proc_entry_type, NULL);
+    if (!ret){
+      GST_WARNING_OBJECT(NULL, "_priv_sme_proc_add_entry, self:%p, Warning! "
+        "g_object_new entry type failed", self);
+      break;
+    }
+
+    ret->sme_proc = self;
+    if (G_MAXUINT32 == id){
+      SEC_Snprintf(ret->entry_name, sizeof(ret->entry_name),
+        sizeof(ret->entry_name) - 1, "%s", entry_tag);
+    } else {
+      SEC_Snprintf(ret->entry_name, sizeof(ret->entry_name),
+        sizeof(ret->entry_name) - 1, "%s.%02u", entry_tag, id);
+    }
+    ret->proc_entry.pszDirectory  = self->dir;
+    ret->proc_entry.pszEntryName  = (HI_CHAR *)ret->entry_name;
+    ret->proc_entry.pfnShowProc   = _priv_sme_proc_entry_get;
+    ret->proc_entry.pfnCmdProc    = _priv_sme_proc_entry_set;
+    ret->proc_entry.pPrivData     = (HI_VOID*)ret;
+    if (G_MAXUINT32 == self->dir_id) g_mutex_lock(&g_mutex);
+    s32error = HI_PROC_AddEntry(self->hi_module_id, &ret->proc_entry);
+    if (G_MAXUINT32 == self->dir_id) g_mutex_unlock(&g_mutex);
+    if (HI_SUCCESS != s32error){
+      GST_WARNING_OBJECT(NULL, "_priv_sme_proc_add_entry, self:%p, Warning! "
+        "HI_PROC_AddEntry failed(%#x),name:%s, id:%d, self->dir:%s,module id:%#x",
+        self, s32error, ret->entry_name, id, self->dir, self->hi_module_id);
+
+      g_object_unref(ret);
+      ret = NULL;
+      break;
+    }
+
+    g_mutex_lock(&self->entry_list_mutex);
+    self->proc_entry_list = g_list_append(self->proc_entry_list, (gpointer)ret);
+    g_mutex_unlock(&self->entry_list_mutex);
+  }while(FALSE);
+
+  GST_INFO_OBJECT(NULL, "out _priv_sme_proc_add_entry, self:%p, ret:%p", self, ret);
+
+  return (GObject*)ret;
+}
+
+static gint _priv_sme_proc_remove_entry(GObject * object, GObject* proc_entry)
+{
+  gint            ret             = 0;
+  GSmeProc*       self            = (GSmeProc*)object;
+  GSmeProcEntry*  self_entry      = (GSmeProcEntry*)proc_entry;
+  HI_S32          s32error        = HI_SUCCESS;
+  gint            entry_index     = 0;
+
+  GST_INFO_OBJECT(NULL, "in _priv_sme_proc_remove_entry,self:%p, self_entry:%p",
+    self, self_entry);
+
+  do{
+    if (!self){
+      GST_WARNING_OBJECT(NULL, "_priv_sme_proc_remove_entry, Warning! object is null");
+      break;
+    }
+
+    if (!proc_entry){
+      GST_WARNING_OBJECT(NULL, "_priv_sme_proc_remove_entry, Warning! proc_entry is null");
+      break;
+    }
+
+    if (G_MAXUINT32 == self->dir_id) g_mutex_lock(&g_mutex);
+    s32error = HI_PROC_RemoveEntry(self->hi_module_id, &self_entry->proc_entry);
+    if (G_MAXUINT32 == self->dir_id) g_mutex_unlock(&g_mutex);
+    if (HI_SUCCESS != s32error){
+      GST_WARNING_OBJECT(NULL, "_priv_sme_proc_remove_entry, Warning! "
+        "HI_PROC_RemoveEntry failed:%#x, himodule_id:%#x, name:%s",
+        s32error, self->hi_module_id, self_entry->entry_name);
+    }
+    g_mutex_lock(&self->entry_list_mutex);
+    entry_index = g_list_index(self->proc_entry_list, (gconstpointer)self_entry);
+    if (entry_index >= 0){
+      self->proc_entry_list = g_list_remove(self->proc_entry_list, (gconstpointer)self_entry);
+    }
+    g_mutex_unlock(&self->entry_list_mutex);
+
+    g_object_unref(self_entry);
+  }while(FALSE);
+
+  GST_INFO_OBJECT(NULL, "out _priv_sme_proc_remove_entry,self:%p, proc_entry:%p, ret:%d",
+    self, proc_entry, ret);
+
+  return ret;
+}
+
+static void g_sme_proc_init(GSmeProc* sme_proc)
+{
+  GST_INFO_OBJECT(NULL, "in g_sme_proc_init, self:%p", sme_proc);
+
+  g_mutex_init(&sme_proc->entry_list_mutex);
+  sme_proc->dir_id = 0;
+  sme_proc->hi_module_id = HI_INVALID_MODULE_ID;
+
+  GST_INFO_OBJECT(NULL, "out g_sme_proc_init, self:%p", sme_proc);
+
+  return;
+}
 
