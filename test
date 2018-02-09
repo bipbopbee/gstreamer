@@ -1,1 +1,137 @@
-dddd
+******************************************************************************/
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <gst/gst.h>
+#include <glib.h>
+#include "osal_str.h"
+#include "hi_common.h"
+
+//lint -e754
+//lint -e835 //G_TYPE_INVALID
+//lint -e413 //G_STRUCT_OFFSET
+
+//静态目录指的是可能多个模块去创建，第一个模块创建了，后面的模块在调用接口来创建直接返回成功。
+//静态目录名:sme.[TAG].PID
+#define HI_PROC_MODULE_NAME_MAX_LEN   (16)
+#define STATIC_DIR_PREFIX             "sme"         //静态目录不能超多16个字符
+#define HI_PROC_ENTRY_NAME_MAX_LEN    (128)         //HI_PROC文件名最大长度
+#define PROC_STATUS_BUF_SIZE          (256)         //读取进程信息的buffersize
+#define DIR_WITH_PID_BLACK_NAME       "mediaserver" //不加进程号的进程黑名单
+
+typedef struct _GSmeProc            GSmeProc;
+typedef struct _GSmeProcClass       GSmeProcClass;
+typedef struct _GSmeProcEntry       GSmeProcEntry;
+typedef struct _GSmeProcEntryClass  GSmeProcEntryClass;
+
+struct _GSmeProcEntry
+{
+  GObject           object;                                 //基类
+  GSmeProc*         sme_proc;                               //GSmeProc对象
+  HI_PROC_ENTRY_S   proc_entry;                             //每个proc的entry对象
+  gchar             entry_name[HI_PROC_ENTRY_NAME_MAX_LEN]; //entry_name字符串
+};
+
+struct _GSmeProcEntryClass
+{
+  GObjectClass  object_class;
+/*
+功能描述：g_signal接口,proc输出函数，GSmeProc实现，调用者通过g_signal_emit_by_name调用。
+返回值  ：0：成功，其他失败。
+参数    ：object    ：GSmeProcEntry对象指针
+          proc_buf  ：透传给HI_PROC的buf参数。
+          buf       ：要输出的字符串。
+*/
+  gint    (*proc_printf)(GObject * object, gpointer proc_buf, const char* buf);
+/*
+功能描述：g_signal接口,proc获取信息函数，cat /proc/hisi/xxx/xx时GSmeProc调用，调用者实现。
+          对entry type为0有效。
+返回值  ：0：成功，其他失败。
+参数：    object    ：GSmeProcEntry对象指针
+          proc_buf  ：透传给proc_printf的buf参数。
+*/
+  gint    (*proc_get)(GObject* object, gpointer proc_buf);
+
+/*
+功能描述：g_signal接口,proc设置函数，echo xxx > /proc/hisi/xxx/xx时GSmeProc调用，调用者实现，
+          并在Add Entry之后connect上。
+返回值  ：  0：成功，其他失败。
+参数    ：object    ：GSmeProcEntry对象指针
+          argc      : 命令个数
+          argv[]    ：命令字符串数组
+          proc_buf  ：透传给proc_printf的buf参数
+*/
+  gint    (*proc_set)( GObject * object, guint argc,
+                    guint8 *argv[],  gpointer proc_buf);
+  gpointer  _gst_reserved[GST_PADDING];
+};
+
+struct _GSmeProc
+{
+  GObject   object;
+  GMutex    entry_list_mutex; //proc_entry_list锁
+  GList*    proc_entry_list;  //SmeProcEntry list
+  HI_U32    hi_module_id;     //hi module id
+  gchar*    dir;              //目录,[playername].[ID]=dir_tag.dir_id
+  guint     dir_id;           //id，默认为G_MAXUINT32，G_MAXUINT32说明为静态proc目录
+  gpointer  _gst_reserved[GST_PADDING];
+};
+
+struct _GSmeProcClass
+{
+  GObjectClass  object_class;
+/*
+功能描述：g_signal接口,增加目录，GSmeProc实现，调用者通过g_signal_emit_by_name调用，
+            一个对象 只能创建1个目录。
+          当前整个进程必须先创建静态目录才能创建动态目录。
+返回值  ：0：成功，其他失败。
+参数    ：object  ：GSmeProc对象指针。
+          dir_name：静态目录时为目录后缀，静态目录组成sme.dir_name，
+                    静态目录可以传入NULL，当为NULL时，自动取PID。
+                    动态目录不能传入NULL。
+          id      ：静态目录必须传入G_MAXUINT32，动态目录传入对象id，以区分多实例。
+*/
+  gint    (*add_dir)(GObject* object, const gchar* dir_tag, guint id);
+/*
+功能描述：g_signal接口,删除目录，GSmeProc实现，调用者通过g_signal_emit_by_name调用。
+返回值  ：0：成功，其他失败。
+参数    ：object：GSmeProc对象指针。
+*/
+  gint    (*remove_dir)(GObject * object);
+/*
+功能描述：g_signal接口,增加proc文件，GSmeProc实现，调用者通过g_signal_emit_by_name调用。
+            动态proc文件时，文件名为：entry_name.id，先有目录才有entry，一个目录
+            可以创建多个entry，必须要调用remove_entry删除。
+返回值  ：返回创建的entry指针，NULL：失败，其他成功。
+参数    ：self      ：GSmeProc对象指针。
+          entry_tag : 动态proc文件时为文件名前缀，静态proc就是proc文件名，不能为NULL。
+          id        ：动态proc时为模块id，作为文件名的后缀，静态proc时id设置为G_MAXUINT32.
+*/
+  GObject*  (*add_entry)(GObject * object, const gchar* entry_tag, guint id);
+/*
+功能描述：g_signal接口,删除proc文件，GSmeProc实现，调用者通过g_signal_emit_by_name调用。
+返回值  ：NULL：失败，其他成功。
+参数    ：object    ：GSmeProc对象指针。
+          proc_entry：add_entry创建的entry对象指针.
+*/
+  gint    (*remove_entry)(GObject * object, GObject* proc_entry);
+  gpointer _gst_reserved[GST_PADDING];
+};
+
+/* signals */
+enum
+{
+  SIGNAL_ADD_DIR = 0,
+  SIGNAL_RM_DIR,
+  SIGNAL_ADD_ENTRY,
+  SIGNAL_RM_ENTRY,
+  SIGNAL_PROC_PRINT,
+  SIGNAL_PROC_GET,
+  SIGNAL_PROC_SET,
+  LAST_SIGNAL
+};
+
+static HI_U32  g_himodule_id          = HI_INVALID_MODULE_ID;     //hi module id,HI_PROC对应使用的HI_MODULE
+
+
