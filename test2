@@ -1,0 +1,105 @@
+
+static void g_sme_proc_finalize(GObject* object)
+{
+  GSmeProc* self = (GSmeProc*)object;
+
+  GST_DEBUG_OBJECT(NULL, "in g_sme_proc_finalize, self:%p", object);
+  if (!self){
+    GST_WARNING_OBJECT(NULL, "out g_sme_proc_finalize,warning! object is null");
+    return;
+  }
+
+  (void)_priv_sme_proc_remove_dir(object);
+
+  g_mutex_clear(&self->entry_list_mutex);
+
+  G_OBJECT_CLASS (g_parent_class)->finalize (object);
+
+  GST_DEBUG_OBJECT(NULL, "out g_sme_proc_finalize, self:%p", object);
+
+  return;
+}
+
+static void g_sme_proc_class_init(GSmeProcClass* klass)
+{
+  GObjectClass* gobject_klass;
+
+  GST_DEBUG_OBJECT(NULL, "in g_sme_proc_class_init");
+
+  g_sme_proc_signals[SIGNAL_ADD_DIR] =
+      g_signal_new ("add_dir", G_TYPE_FROM_CLASS (klass),
+      G_SIGNAL_RUN_LAST,
+      (guint)G_STRUCT_OFFSET (GSmeProcClass, add_dir), NULL, NULL,
+      g_cclosure_marshal_generic,
+      G_TYPE_INT,//return type
+      2,//arg num
+      G_TYPE_STRING, G_TYPE_UINT);
+
+  g_sme_proc_signals[SIGNAL_RM_DIR] =
+      g_signal_new ("remove_dir", G_TYPE_FROM_CLASS (klass),
+      G_SIGNAL_RUN_LAST,
+      (guint)G_STRUCT_OFFSET (GSmeProcClass, remove_dir), NULL, NULL,
+      g_cclosure_marshal_generic,
+      G_TYPE_INT,//return type
+      0//arg num
+      );
+
+  g_sme_proc_signals[SIGNAL_ADD_ENTRY] =
+      g_signal_new ("add_entry", G_TYPE_FROM_CLASS (klass),
+      G_SIGNAL_RUN_LAST,
+      (guint)G_STRUCT_OFFSET (GSmeProcClass, add_entry), NULL, NULL,
+      g_cclosure_marshal_generic,
+      G_TYPE_OBJECT,//return type
+      2,//arg num
+      G_TYPE_STRING, G_TYPE_UINT);
+
+  g_sme_proc_signals[SIGNAL_RM_ENTRY] =
+      g_signal_new ("remove_entry", G_TYPE_FROM_CLASS (klass),
+      G_SIGNAL_RUN_LAST,
+      (guint)G_STRUCT_OFFSET (GSmeProcClass, remove_entry), NULL, NULL,
+      g_cclosure_marshal_generic,
+      G_TYPE_INT,//return type
+      1,//arg num
+      G_TYPE_OBJECT);
+
+  g_parent_class  = g_type_class_peek_parent (klass);
+  gobject_klass   = (GObjectClass *)klass;
+
+  gobject_klass->finalize = g_sme_proc_finalize;
+
+  klass->add_dir          = _priv_sme_proc_add_dir;
+  klass->remove_dir       = _priv_sme_proc_remove_dir;
+  klass->add_entry        = _priv_sme_proc_add_entry;
+  klass->remove_entry     = _priv_sme_proc_remove_entry;
+
+  GST_DEBUG_OBJECT(NULL, "out g_sme_proc_class_init");
+
+  return ;
+}
+//-------------------------------------------------------------------------
+
+static HI_S32 _priv_sme_proc_entry_get(HI_PROC_SHOW_BUFFER_S * pstBuf, HI_VOID *pPrivData)
+{
+  GSmeProcEntry*  self_entry      = (GSmeProcEntry*)pPrivData;;
+  gint            emit_error      = 0;
+
+  GST_INFO_OBJECT(NULL, "in _priv_sme_proc_entry_get, pstBuf:%p, pPrivData:%p", pstBuf, pPrivData);
+
+  do{
+    if (!pPrivData){
+      (void)HI_PROC_Printf(pstBuf, "\tpPrivData is null why?\n");
+      break;
+    }
+
+    g_signal_emit((gpointer)self_entry,//callback:arg1, must be self object
+      g_sme_proc_signals[SIGNAL_PROC_GET],//signal_id
+      0,//Gualk default is 0.
+      (gpointer)pstBuf,
+      &emit_error);
+
+  }while(FALSE);
+ 
+  GST_INFO_OBJECT(NULL, "out _priv_sme_proc_entry_get, emit_error:%d", emit_error);
+
+  return HI_SUCCESS;
+}
