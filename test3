@@ -1,0 +1,540 @@
+//-------------begin static proc -----------------
+#define SME_PROC_GOBJECT_NAME                "sme_proc"                     //sme_proc GObject名字
+#define CTRL_ENTRY_NAME                      "omx.ctrl"                     //静态proc文件名
+#define PROC_OUT_BUF_MAX_LEN                 (2048)                         //proc打印输出buffer最大长度
+#define PROC_CMD_HELP                        "help"                         //查看帮助命令字符串
+#ifndef SME_RLS
+#define PROC_CMD_SET_DUMP_PATH               "dump.path"                    //设置dump 码流路径命令字符串
+#define PROC_CMD_DUMP_AIN_SWITCH             "dump.a.dec.in.switch"         //音频输入数据dump命令字符串
+#define PROC_CMD_DUMP_AOUT_SWITCH            "dump.a.dec.out.switch"        //音频输出数据dump命令字符串
+#define PROC_CMD_DUMP_VIN_SWITCH             "dump.v.dec.in.switch"         //视频输入数据dump命令字符串
+#endif
+#define PROC_CMD_OUT_FIRST_IDR_ONLY_SWITCH   "v.out_first_idr_only"         //设置只输出第一个IDR命令字符串
+#define PROC_CMD_VDEC_THRESHOLD              "v.dec.threshold"              //视频解码容错命令字符串
+#define PROC_CMD_VDEC_DISABLE                "v.dec.disable"                //关闭视频解码命令字符串
+#define PROC_CMD_ADEC_DISABLE                "a.dec.disable"                //关闭视频解码命令字符串
+#define PROC_CMD_ADEC_OUT_COMPUTE_PTS_SWITCH "a.dec.out.compute.pts"        //音频频解码输出计算pts命令字符串
+
+/*
+g_signal_emit_by_name(object, //arg1 of callback.gobject instance which the signal belongs to.
+  "proc_printf",//callback func name.
+  proc_buf,//arg2 of callback func:proc_buf.
+  str_buf,//arg3 of callback func:buf.
+  &ret);//retrun value of callback func.
+*/
+#define PROC_PRINTF(ret, object, proc_buf, str_buf, str_fmt,...) \
+    (void)g_snprintf(str_buf, sizeof(str_buf), str_fmt, ##__VA_ARGS__);\
+    g_signal_emit_by_name(object, "proc_printf", proc_buf, str_buf, &ret);
+
+#define OP_PAIR_3(op_pair) GST_VALID_TIME_AS_USECONDS(op_pair.end), \
+  GST_VALID_TIME_AS_USECONDS(op_pair.begin), \
+  GST_VALID_TIME_AS_USECONDS(op_pair.end-op_pair.begin)
+
+static gint _priv_do_proc_help(GObject * object, guint argc,
+    const guint8 *argv[], gpointer proc_buf, gpointer pcontext);
+#ifndef SME_RLS
+static gint _priv_do_proc_set_dump_path(GObject * object,
+    guint argc, const guint8 *argv[], gpointer proc_buf, gpointer pcontext);
+static gint _priv_do_proc_set_dump_adec_in_switch(GObject * object,
+    guint argc, const guint8 *argv[],  gpointer proc_buf, gpointer pcontext);
+static gint _priv_do_proc_set_dump_adec_out_switch(GObject * object,
+    guint argc, const guint8 *argv[],  gpointer proc_buf, gpointer pcontext);
+static gint _priv_do_proc_set_dump_vdec_in_switch(GObject * object,
+    guint argc, const guint8 *argv[],  gpointer proc_buf, gpointer pcontext);
+#endif
+static gint _priv_do_proc_set_out_first_idr_only_switch(GObject * object,
+    guint argc, const guint8 *argv[],  gpointer proc_buf, gpointer pcontext);
+static gint _priv_do_proc_set_vdec_threshold(GObject * object,
+    guint argc, const guint8 *argv[],  gpointer proc_buf, gpointer pcontext);
+static gint _priv_do_proc_set_adec_switch(GObject * object,
+    guint argc, const guint8 *argv[],  gpointer proc_buf, gpointer pcontext);
+static gint _priv_do_proc_set_vdec_switch(GObject * object,
+    guint argc, const guint8 *argv[],  gpointer proc_buf, gpointer pcontext);
+static gint _priv_do_proc_set_adec_out_compute_pts_switch(GObject * object,
+    guint argc, const guint8 *argv[],  gpointer proc_buf, gpointer pcontext);
+static gint _priv_do_proc_not_support(GObject * object,
+    guint argc, const guint8 *argv[],  gpointer proc_buf, gpointer pcontext);
+
+typedef gint (*pfnDoProcCmd)(GObject * object, guint argc,
+    const guint8 *argv[], gpointer proc_buf, gpointer pcontext);
+typedef struct _proc_cmd_item
+{
+  const gchar* key;//cmd name
+  pfnDoProcCmd pfn_do_proc_cmd;
+}ProcCmdItem;
+
+static ProcCmdItem g_static_proc_cmd_items[] = {
+  {PROC_CMD_HELP,                       _priv_do_proc_help},
+#ifndef SME_RLS
+  {PROC_CMD_SET_DUMP_PATH,              _priv_do_proc_set_dump_path},
+  {PROC_CMD_DUMP_AIN_SWITCH,            _priv_do_proc_set_dump_adec_in_switch},
+  {PROC_CMD_DUMP_AOUT_SWITCH,           _priv_do_proc_set_dump_adec_out_switch},
+  {PROC_CMD_DUMP_VIN_SWITCH,            _priv_do_proc_set_dump_vdec_in_switch},
+  #endif
+  {PROC_CMD_OUT_FIRST_IDR_ONLY_SWITCH,  _priv_do_proc_set_out_first_idr_only_switch},
+  {PROC_CMD_VDEC_THRESHOLD,             _priv_do_proc_set_vdec_threshold},
+  {PROC_CMD_VDEC_DISABLE,               _priv_do_proc_set_vdec_switch},
+  {PROC_CMD_ADEC_DISABLE,               _priv_do_proc_set_adec_switch},
+  {PROC_CMD_ADEC_OUT_COMPUTE_PTS_SWITCH,_priv_do_proc_set_adec_out_compute_pts_switch},
+  {NULL,                                _priv_do_proc_not_support}
+};
+
+static GObject* g_sme_proc                    = NULL;
+static GObject* g_sme_proc_entry_ctrl         = NULL;
+
+//extern global vars, must be unique name.
+#ifndef SME_RLS
+gboolean g_omx_dump_adec_in_flag                     = FALSE;
+gboolean g_omx_dump_adec_out_flag                    = FALSE;
+gboolean g_omx_dump_vdec_in_flag                     = FALSE;
+gchar    g_omx_dump_path[PROC_DUMP_PATH_MAX_LEN]    = {'/', 'm', 'n', 't',0,};
+#endif
+gboolean g_omx_out_first_idr_only_flag               = FALSE;
+gint     g_omx_vdec_threshold                        = -1;
+gboolean g_omx_vdec_disable_flag                     = FALSE;
+gboolean g_omx_adec_disable_flag                     = FALSE;
+gboolean g_omx_adec_out_compute_pts_flag             = FALSE;
+
+static gint _priv_do_proc_help( GObject * object, guint argc,
+    const guint8 *argv[], gpointer proc_buf, gpointer pcontext)
+{
+  gint  ret                             = 0;
+  gchar temp_buf[PROC_OUT_BUF_MAX_LEN]  = {0,};
+
+  (void)argc;
+  (void)pcontext;
+  (void)argv;
+
+  PROC_PRINTF(ret, object, proc_buf, temp_buf,
+    "\n----------------------------gstomx.ctrl config help info-----------------\n");
+
+  PROC_PRINTF(ret, object, proc_buf, temp_buf,
+    "you can input as following:\n");
+  PROC_PRINTF(ret, object, proc_buf, temp_buf,
+    "\t echo cmd.type cmd.val > /proc/hisi/sme.[TAG]/%s\n", CTRL_ENTRY_NAME);
+  PROC_PRINTF(ret, object, proc_buf, temp_buf,
+    "\t exampl:echo dump.path /mnt > /proc/hisi/sme.mediaserver/%s\n\n", CTRL_ENTRY_NAME);
+
+  PROC_PRINTF(ret, object, proc_buf, temp_buf,
+    "surpport following cmd.type & cmd.val:\n\n");
+
+  PROC_PRINTF(ret, object, proc_buf, temp_buf,
+    "---------------------|----------|------------------------------------------\n");
+  PROC_PRINTF(ret, object, proc_buf, temp_buf,
+    "cmd.type             |cmd.val1  |cmd action\n");
+
+  PROC_PRINTF(ret, object, proc_buf, temp_buf,
+    "---------------------|----------|--------------------------------\n");
+#ifndef SME_RLS
+  PROC_PRINTF(ret, object, proc_buf, temp_buf,
+    "dump.path            |[dir]     |set path for dump data. [dir] must be absolute path.example:\n"
+    "                     |          |echo dump.path /mnt > /proc/hisi/sme.mediaserver/%s\n",CTRL_ENTRY_NAME);
+  PROC_PRINTF(ret, object, proc_buf, temp_buf,
+    "dump.a.dec.in.switch |0/1       |disable or enable dump adec in data. 0:disable(default), 1:enable.\n");
+
+  PROC_PRINTF(ret, object, proc_buf, temp_buf,
+    "dump.a.dec.out.switch|0/1       |disable or enable dump adec out data. 0:disable(default), 1:enable.\n");
+  PROC_PRINTF(ret, object, proc_buf, temp_buf,
+    "dump.v.dec.in.switch |0/1       |disable or enable dump vdec in data. 0:disable(default), 1:enable.\n");
+#endif
+  PROC_PRINTF(ret, object, proc_buf, temp_buf,
+    "v.out_first_idr_only |0/1       |disable or enable output only first idr. 0:disable(default), 1:enable.\n");
+  PROC_PRINTF(ret, object, proc_buf, temp_buf,
+    "v.dec.disable        |0/1       |disable or enable vdec. 0:disable(default), 1:enable.\n");
+  PROC_PRINTF(ret, object, proc_buf, temp_buf,
+    "a.dec.disable        |0/1       |disable or enable adec. 0:disable(default), 1:enable.\n");
+  PROC_PRINTF(ret, object, proc_buf, temp_buf,
+    "v.dec.threshold      |[-1,0~100]|set vdec threshold,cmd.val1:demux id, cmd.val2:inport.id,example:\n"
+    "                     |          |set:echo demux.inport.id 0 32 > /proc/hisi/sme.mediaserver/%s\n"
+    "                     |          |unset:echo demux.inport.id 0 -1 > /proc/hisi/sme.mediaserver/%s\n",
+    CTRL_ENTRY_NAME, CTRL_ENTRY_NAME);
+  PROC_PRINTF(ret, object, proc_buf, temp_buf,
+    "a.dec.out.compute.pts|0/1       |disable or enable omxadec compute out pts. 0:disable(default), 1:enable.\n");
+
+  PROC_PRINTF(ret, object, proc_buf, temp_buf,"\n\n");
+
+  return ret;
+}
+#ifndef SME_RLS
+static gint _priv_do_proc_set_dump_path(GObject * object,
+    guint argc, const guint8 *argv[], gpointer proc_buf, gpointer pcontext)
+{
+  gint  ret                             = 0;
+  gchar temp_buf[PROC_OUT_BUF_MAX_LEN]  = {0,};
+
+  (void)argc;
+  (void)pcontext;
+
+  if (argc < 2 || !argv[1] || argv[1][0] != '/') {
+    PROC_PRINTF(ret, object, proc_buf, temp_buf,
+      "cmd:%s must have a val, val must be a dir,start with:/xxx\n", argv[0]);
+  }else {
+    (void)g_snprintf(g_omx_dump_path, sizeof(g_omx_dump_path), "%s", argv[1]);
+  }
+
+  return ret;
+}
+
+static gint _priv_do_proc_set_dump_adec_in_switch(GObject * object,
+    guint argc, const guint8 *argv[],  gpointer proc_buf, gpointer pcontext)
+{
+  gint  ret                             = 0;
+  gchar temp_buf[PROC_OUT_BUF_MAX_LEN]  = {0,};
+
+  (void)argc;
+  (void)pcontext;
+
+  if (argc < 2 || !argv[1]) {
+    PROC_PRINTF(ret, object, proc_buf, temp_buf,
+      "cmd:%s must have a val,val must be 0 or 1\n", argv[0]);
+  } else {
+    g_omx_dump_adec_in_flag = (gboolean)atoi((const gchar*)argv[1]);
+  }
+
+  return ret;
+}
+
+static gint _priv_do_proc_set_dump_adec_out_switch(GObject * object,
+    guint argc, const guint8 *argv[],  gpointer proc_buf, gpointer pcontext)
+{
+  gint  ret                             = 0;
+  gchar temp_buf[PROC_OUT_BUF_MAX_LEN]  = {0,};
+
+  (void)argc;
+  (void)pcontext;
+
+  if (argc < 2 || !argv[1]) {
+    PROC_PRINTF(ret, object, proc_buf, temp_buf,
+      "cmd:%s must have a val,val must be 0 or 1\n", argv[0]);
+  } else {
+    g_omx_dump_adec_out_flag = (gboolean)atoi((const gchar*)argv[1]);
+  }
+
+  return ret;
+}
+
+static gint _priv_do_proc_set_dump_vdec_in_switch(GObject * object,
+    guint argc, const guint8 *argv[],  gpointer proc_buf, gpointer pcontext)
+{
+  gint  ret                             = 0;
+  gchar temp_buf[PROC_OUT_BUF_MAX_LEN]  = {0,};
+
+  (void)argc;
+  (void)pcontext;
+
+  if (argc < 2 || !argv[1]) {
+    PROC_PRINTF(ret, object, proc_buf, temp_buf,
+      "cmd:%s must have a val,val must be 0 or 1\n", argv[0]);
+  }else {
+    g_omx_dump_vdec_in_flag = (gboolean)atoi((const gchar*)argv[1]);
+  }
+
+  return ret;
+}
+#endif
+
+static gint _priv_do_proc_set_out_first_idr_only_switch(GObject * object,
+    guint argc, const guint8 *argv[],  gpointer proc_buf, gpointer pcontext)
+{
+  gint  ret                             = 0;
+  gchar temp_buf[PROC_OUT_BUF_MAX_LEN]  = {0,};
+
+  (void)argc;
+  (void)pcontext;
+
+  if (argc < 2 || !argv[1]) {
+    PROC_PRINTF(ret, object, proc_buf, temp_buf,
+      "cmd:%s must have a val,val must be 0 or 1\n", argv[0]);
+  }else {
+    g_omx_out_first_idr_only_flag = (gboolean)atoi((const gchar*)argv[1]);
+  }
+
+  return ret;
+}
+
+
+static gint _priv_do_proc_set_vdec_threshold(GObject * object,
+    guint argc, const guint8 *argv[],  gpointer proc_buf, gpointer pcontext)
+{
+  gint  ret                             = 0;
+  gchar temp_buf[PROC_OUT_BUF_MAX_LEN]  = {0,};
+
+  (void)argc;
+  (void)pcontext;
+
+  if (argc < 2 || !argv[1]) {
+    PROC_PRINTF(ret, object, proc_buf, temp_buf,
+      "cmd:%s must have a val,val must be 0 or 1\n", argv[0]);
+  } else {
+    g_omx_vdec_threshold = (gint)atoi((const gchar*)argv[1]);
+    if (g_omx_vdec_threshold > 100){
+      g_omx_vdec_threshold = 100;
+    }
+  }
+
+  return ret;
+}
+
+
+static gint _priv_do_proc_set_vdec_switch(GObject * object,
+    guint argc, const guint8 *argv[],  gpointer proc_buf, gpointer pcontext)
+{
+  gint  ret                             = 0;
+  gchar temp_buf[PROC_OUT_BUF_MAX_LEN]  = {0,};
+
+  (void)argc;
+  (void)pcontext;
+
+  if (argc < 2 || !argv[1]) {
+    PROC_PRINTF(ret, object, proc_buf, temp_buf,
+      "cmd:%s must have a val,val must be 0 or 1\n", argv[0]);
+  } else {
+    g_omx_vdec_disable_flag = (gboolean)atoi((const gchar*)argv[1]);
+    PROC_PRINTF(ret, object, proc_buf, temp_buf,
+      "g_omx_vdec_disable_flag:%d\n", g_omx_vdec_disable_flag);
+
+  }
+
+  return ret;
+}
+
+static gint _priv_do_proc_set_adec_switch(GObject * object,
+    guint argc, const guint8 *argv[],  gpointer proc_buf, gpointer pcontext)
+{
+  gint  ret                             = 0;
+  gchar temp_buf[PROC_OUT_BUF_MAX_LEN]  = {0,};
+
+  (void)argc;
+  (void)pcontext;
+
+  if (argc < 2 || !argv[1]) {
+    PROC_PRINTF(ret, object, proc_buf, temp_buf,
+      "cmd:%s must have a val,val must be 0 or 1\n", argv[0]);
+  } else {
+    g_omx_adec_disable_flag = (gboolean)atoi((const gchar*)argv[1]);
+  }
+
+  return ret;
+}
+
+static gint _priv_do_proc_set_adec_out_compute_pts_switch(GObject * object,
+    guint argc, const guint8 *argv[],  gpointer proc_buf, gpointer pcontext)
+{
+  gint  ret                             = 0;
+  gchar temp_buf[PROC_OUT_BUF_MAX_LEN]  = {0,};
+
+  (void)argc;
+  (void)pcontext;
+
+  if (argc < 2 || !argv[1]) {
+    PROC_PRINTF(ret, object, proc_buf, temp_buf,
+      "cmd:%s must have a val,val must be 0 or 1\n", argv[0]);
+  } else {
+    g_omx_adec_out_compute_pts_flag = (gboolean)atoi((const gchar*)argv[1]);
+  }
+
+  return ret;
+}
+
+static gint _priv_do_proc_not_support(GObject * object, guint argc,
+  const guint8 *argv[],  gpointer proc_buf, gpointer pcontext)
+{
+  gint  ret                             = 0;
+  gchar temp_buf[PROC_OUT_BUF_MAX_LEN]  = {0,};
+
+  if (argc > 1){
+    PROC_PRINTF(ret, object, proc_buf, temp_buf, "cmd:%s not support!", argv[0]);
+  }
+
+  ret = _priv_do_proc_help(object, argc, argv, proc_buf, pcontext);
+
+  return ret;
+}
+
+static GObject* _priv_sme_proc_create_object()
+{
+  GObject*  ret           = NULL;
+  GType     sme_proc_type = g_type_from_name(SME_PROC_GOBJECT_NAME);
+
+  G_STMT_START{
+    if (G_TYPE_INVALID == sme_proc_type){
+      GST_WARNING("no proc GType named:%s", SME_PROC_GOBJECT_NAME);
+      break;
+    }
+    ret = (GObject*)g_object_new(sme_proc_type, NULL);
+    if (!ret){
+      GST_WARNING("new %s object failed, why ?", SME_PROC_GOBJECT_NAME);
+      break;
+    }
+  }G_STMT_END;
+
+  return ret;
+}
+
+static void _priv_sme_proc_destroy_object(GObject* object)
+{
+  g_object_unref(object);
+
+  return;
+}
+
+static gint _priv_sme_proc_add_static_dir(GObject* sme_proc, const gchar* dir_tag)
+{
+  gint ret = 0;
+
+  (void)dir_tag;
+
+  g_signal_emit_by_name(sme_proc, //arg1 of callback.gobject instance which the signal belongs to.
+    "add_dir",//callback func name.
+    NULL,//arg2 of callback func:dir_tag
+    G_MAXUINT32,//arg3 of callback func:id
+    &ret);//retrun value of callback func.
+
+  return ret;
+}
+
+static gint _priv_sme_proc_remove_dir(GObject* sme_proc)
+{
+  gint ret = 0;
+
+  g_signal_emit_by_name(sme_proc, //arg1 of callback.gobject instance which the signal belongs to.
+    "remove_dir",//callback func name.
+    &ret);//retrun value of callback func.
+
+  return ret;
+}
+
+
+static gint _priv_proc_static_get(GObject* object, gpointer proc_buf, gpointer pcontext)
+{
+  gint  ret                             = 0;
+  gchar temp_buf[PROC_OUT_BUF_MAX_LEN]  = {0,};
+
+  (void)pcontext;
+
+  PROC_PRINTF(ret, object, proc_buf, temp_buf,
+    "\n------------------gstomx Contrl Info-----------------------------\n");
+#ifndef SME_RLS
+  PROC_PRINTF(ret, object, proc_buf, temp_buf,
+    "dump.path             :%s\n", g_omx_dump_path);
+  PROC_PRINTF(ret, object, proc_buf, temp_buf,
+    "dump.a.dec.in.switch  :%d\n", g_omx_dump_adec_in_flag);
+  PROC_PRINTF(ret, object, proc_buf, temp_buf,
+    "dump.a.dec.out.switch :%d\n", g_omx_dump_adec_out_flag);
+  PROC_PRINTF(ret, object, proc_buf, temp_buf,
+    "dump.v.dec.in.switch  :%d\n", g_omx_dump_vdec_in_flag);
+#endif
+
+  PROC_PRINTF(ret, object, proc_buf, temp_buf,
+    "v.out_first_idr_only  :%d\n", g_omx_out_first_idr_only_flag);
+  PROC_PRINTF(ret, object, proc_buf, temp_buf,
+    "a.dec.out.compute.pts :%d\n", g_omx_adec_out_compute_pts_flag);
+  PROC_PRINTF(ret, object, proc_buf, temp_buf,
+    "a.dec.disable         :%d\n", g_omx_adec_disable_flag);
+  PROC_PRINTF(ret, object, proc_buf, temp_buf,
+    "v.dec.disable         :%d\n", g_omx_vdec_disable_flag);
+  PROC_PRINTF(ret, object, proc_buf, temp_buf,
+    "v.dec.threshold       :%d\n", g_omx_vdec_threshold);
+
+  PROC_PRINTF(ret, object, proc_buf, temp_buf, "\n\n");
+
+
+  return ret;
+}
+
+static ProcCmdItem* _priv_proc_static_set_parse(guint argc, guint8 *argv[], gpointer pcontext)
+{
+  ProcCmdItem*  item;
+  guint         i = 0;
+
+  (void)pcontext;
+
+  while(NULL != (item = &g_static_proc_cmd_items[i++])){
+    if (!item->key) break;
+    if (argc >= 1 && argv[0]
+      && !strcmp(item->key, (const char*)argv[0])) break;
+  }
+
+  return item;
+}
+
+static gint _priv_proc_static_set(GObject * object, guint argc,
+                  guint8 *argv[],  gpointer proc_buf, gpointer pcontext)
+{
+  gint          ret ;
+  ProcCmdItem*  item ;
+
+  if (!argv) return -1;
+  if (argc < 1) return -1;
+
+  item = _priv_proc_static_set_parse(argc, argv, pcontext);
+  ret = item->pfn_do_proc_cmd(object, argc, (const guint8 **)argv, proc_buf, pcontext);
+
+  return ret;
+}
+
+static GObject* _priv_sme_proc_add_static_entry(GObject* sme_proc, const gchar* entry_name)
+{
+  GObject* ret = NULL;
+
+  g_signal_emit_by_name(sme_proc, //arg1 of callback.gobject instance which the signal belongs to.
+    "add_entry",//callback func name.
+    entry_name,//arg2 of callback func:entry_tag, for static entry, it's the entry name.
+    G_MAXUINT32,//arg3 of callback func:id, for static entry,it must be G_MAXUINT32.
+    &ret);//retrun value of callback func.
+
+  if (NULL != ret){
+    g_signal_connect(ret, "proc_get", G_CALLBACK (_priv_proc_static_get), NULL);
+    g_signal_connect(ret, "proc_set", G_CALLBACK (_priv_proc_static_set), NULL);
+  }
+
+  return ret;
+}
+
+static void _priv_create_static_proc()
+{
+  gint error = -1;
+
+  G_STMT_START{
+    g_sme_proc = _priv_sme_proc_create_object();
+    if (!g_sme_proc) break;
+
+    error = _priv_sme_proc_add_static_dir(g_sme_proc, NULL);
+    if (error) break;
+
+    g_sme_proc_entry_ctrl = _priv_sme_proc_add_static_entry(g_sme_proc, CTRL_ENTRY_NAME);
+    if (!g_sme_proc_entry_ctrl) break;
+
+  }G_STMT_END;
+
+  if (!g_sme_proc_entry_ctrl) {
+    if (error) {
+      _priv_sme_proc_remove_dir(g_sme_proc);
+    }
+    if (g_sme_proc) {
+      _priv_sme_proc_destroy_object(g_sme_proc);
+      g_sme_proc = NULL;
+    }
+  }
+
+  return;
+}
+
+void gst_sme_proc_update_buffer_info(ProcBufferInfo* buffer_info,
+  gint64 cur_pts, gint64 cur_duration)
+{
+  if (-1 == buffer_info->first.valid){
+    buffer_info->first.pts      = cur_pts;
+    buffer_info->first.duration = cur_duration;
+    buffer_info->first.valid    = 0;
+    buffer_info->first.cur_time = g_get_monotonic_time();
+  }
+
+  buffer_info->pre = buffer_info->cur;
+  buffer_info->cur.pts = cur_pts;
+  buffer_info->cur.duration = cur_duration;
+  buffer_info->buffer_num++;
+  return;
+}
+
+//end for proc------------------------------------------------------------------
