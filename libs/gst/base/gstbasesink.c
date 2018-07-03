@@ -4792,6 +4792,7 @@ gst_base_sink_get_duration (GstBaseSink * basesink, GstFormat format,
 }
 
 static gboolean
+//对pipeline查询position函数
 default_element_query (GstElement * element, GstQuery * query)
 {
   gboolean res = FALSE;
